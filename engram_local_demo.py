@@ -421,10 +421,22 @@ class EngramLM(nn.Module):
             def _make_hook(eng):
                 def _hook(module, args):
                     h = args[0]
+<<<<<<< Updated upstream
                     # 动态迁移：确保 Engram 参数与隐藏态在同一设备
                     if hasattr(eng, 'mh_emb') and eng.mh_emb.weight.device != h.device:
                         eng.to(h.device)
                     engram_out = eng(h, ids_np)
+=======
+                    # 使用通用方式获取 Engram 模块的当前设备
+                    try:
+                        eng_device = next(eng.parameters()).device
+                        if eng_device != h.device:
+                            eng.to(h.device)
+                    except StopIteration:
+                        pass
+                    engram_out = eng(h, ids_np)
+                    engram_out = engram_out.to(h.device)
+>>>>>>> Stashed changes
                     return (h + engram_out,) + args[1:]
                 return _hook
             hooks.append(layer.register_forward_pre_hook(_make_hook(engram)))
