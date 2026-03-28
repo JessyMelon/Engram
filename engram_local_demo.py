@@ -257,9 +257,40 @@ def _detect_device():
     return torch.device("cpu")
 
 
+def _setup_tensor_parallel(gpu_devices_str: str):
+    """设置多GPU环境，返回 (主设备, 设备列表)"""
+    if not torch.cuda.is_available():
+        print("[WARN] CUDA not available, falling back to single device")
+        return _detect_device(), [_detect_device()]
+    
+    device_ids = [int(d.strip()) for d in gpu_devices_str.split(",") if d.strip()]
+    n_gpu = torch.cuda.device_count()
+    valid_ids = [did for did in device_ids if 0 <= did < n_gpu]
+
+    if not valid_ids:
+        print(f"[WARN] No requested GPUs {device_ids} available (found {n_gpu} GPUs). "
+              f"Falling back to cuda:0.")
+        valid_ids = [0]
+    elif len(valid_ids) < len(device_ids):
+        dropped = [d for d in device_ids if d not in valid_ids]
+        print(f"[WARN] GPU(s) {dropped} not available (found {n_gpu} GPUs). "
+              f"Using {valid_ids} only.")
+
+    devices = [torch.device(f"cuda:{did}") for did in valid_ids]
+    primary_device = devices[0]
+    
+    print(f"[Setup] Tensor Parallel: {len(devices)} GPUs = {device_ids}")
+    for dev in devices:
+        total_mem = torch.cuda.get_device_properties(dev.index).total_memory / 1e9
+        print(f"  {dev}: {total_mem:.1f} GB")
+    
+    return primary_device, devices
+
+
 class EngramLM(nn.Module):
     def __init__(self, model_name: str, ecfg: EngramConfig,
-                 use_engram=True, device=None, dtype=None):
+                 use_engram=True, device=None, dtype=None,
+                 tensor_parallel_devices=None, engram_device_strategy="distribute"):
         super().__init__()
 
         if device is None:
@@ -269,12 +300,22 @@ class EngramLM(nn.Module):
 
         self.device_target = device
         self.dtype = dtype
+        self.tensor_parallel_devices = tensor_parallel_devices or [device]
+        self.engram_device_strategy = engram_device_strategy
+        self.n_devices = len(self.tensor_parallel_devices)
 
         # ── 加载预训练模型 ──
         print(f"[1/4] Loading {model_name} ({dtype})...")
-        self.base = AutoModelForCausalLM.from_pretrained(
-            model_name, torch_dtype=dtype, trust_remote_code=True,
-        )
+        if self.n_devices > 1:
+            self.base = AutoModelForCausalLM.from_pretrained(
+                model_name, torch_dtype=dtype, trust_remote_code=True,
+                device_map="auto",
+            )
+            print(f"  Using device_map='auto' across {self.n_devices} GPUs")
+        else:
+            self.base = AutoModelForCausalLM.from_pretrained(
+                model_name, torch_dtype=dtype, trust_remote_code=True,
+            )
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name, trust_remote_code=True,
         )
@@ -323,6 +364,8 @@ class EngramLM(nn.Module):
             for lid in ecfg.engram_layer_ids:
                 self.engrams[str(lid)] = Engram(lid, ecfg, hmap, hs)
             self.engrams = self.engrams.to(dtype=dtype)
+            if self.n_devices > 1:
+                self._allocate_engram_devices()
         else:
             print("[3/4] Engram disabled (baseline mode)")
 
@@ -340,6 +383,32 @@ class EngramLM(nn.Module):
                   + n_eng * 4 * 3) / 1e9  # 粗估: model + grad + opt
         print(f"  Est. memory  : ~{mem_gb:.1f} GB")
 
+    def _allocate_engram_devices(self):
+        """根据策略分配 Engram 模块到多张 GPU
+        
+        注意：这只是初始放置的 hint。由于 HF device_map='auto' 可能把 backbone 层
+        放到不同 GPU，forward 中的 _make_hook 会在运行时动态迁移 Engram 到与隐藏态
+        相同的设备，作为最终的安全网。
+        """
+        strategy = self.engram_device_strategy
+        layer_ids = sorted([int(k) for k in self.engrams.keys()])
+        
+        if strategy == "distribute":
+            for idx, lid in enumerate(layer_ids):
+                target = self.tensor_parallel_devices[idx % self.n_devices]
+                self.engrams[str(lid)].to(target)
+                print(f"  Engram[L{lid}] -> {target}")
+        elif strategy == "gpu0":
+            target = self.tensor_parallel_devices[0]
+            for lid in layer_ids:
+                self.engrams[str(lid)].to(target)
+            print(f"  All Engrams -> {target}")
+        elif strategy == "gpu1":
+            target = self.tensor_parallel_devices[min(1, self.n_devices - 1)]
+            for lid in layer_ids:
+                self.engrams[str(lid)].to(target)
+            print(f"  All Engrams -> {target}")
+
     # ── Forward ──────────────────────────────────────────────────────
 
     def forward(self, input_ids, labels=None):
@@ -352,9 +421,19 @@ class EngramLM(nn.Module):
             def _make_hook(eng):
                 def _hook(module, args):
                     h = args[0]
-                    return (h + eng(h, ids_np),) + args[1:]
+                    # 动态迁移：确保 Engram 参数与隐藏态在同一设备
+                    if hasattr(eng, 'mh_emb') and eng.mh_emb.weight.device != h.device:
+                        eng.to(h.device)
+                    engram_out = eng(h, ids_np)
+                    return (h + engram_out,) + args[1:]
                 return _hook
             hooks.append(layer.register_forward_pre_hook(_make_hook(engram)))
+
+        # 多卡时确保输入在正确设备
+        if self.n_devices > 1:
+            input_ids = input_ids.to(self.tensor_parallel_devices[0])
+            if labels is not None:
+                labels = labels.to(self.tensor_parallel_devices[0])
 
         try:
             outputs = self.base(input_ids=input_ids, labels=labels, use_cache=False)
@@ -375,9 +454,13 @@ class EngramLM(nn.Module):
     def generate(self, prompt_ids, max_new=150, temperature=0.7, top_k=50):
         self.eval()
         ids = prompt_ids.clone()
+        if self.n_devices > 1:
+            ids = ids.to(self.tensor_parallel_devices[0])
         for _ in range(max_new):
             crop = ids[:, -self.max_seq_len:]
             logits, _ = self(crop)
+            if self.n_devices > 1:
+                logits = logits.to(self.tensor_parallel_devices[0])
             logits = logits[:, -1, :] / max(temperature, 1e-5)
             if top_k > 0:
                 v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
@@ -421,12 +504,15 @@ def load_texts(data_dir):
 # 7. 训练
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def train_model(model, dataset, epochs, lr, bs, device):
+def train_model(model, dataset, epochs, lr, bs, device, tensor_parallel_devices=None):
     loader = DataLoader(dataset, batch_size=bs, shuffle=True, drop_last=True)
     params = [p for p in model.parameters() if p.requires_grad]
     if not params:
         print("No trainable parameters! (--no_engram mode, skipping training)")
         return
+
+    primary_device = (tensor_parallel_devices or [device])[0]
+    n_gpus = len(tensor_parallel_devices) if tensor_parallel_devices else 1
 
     optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=0.01)
     total_steps = epochs * len(loader)
@@ -435,7 +521,7 @@ def train_model(model, dataset, epochs, lr, bs, device):
     print(f"\n{'=' * 60}")
     print(f"  Training: {epochs} epochs × {len(loader)} steps, bs={bs}")
     print(f"  Trainable: {sum(p.numel() for p in params) / 1e6:.1f}M params")
-    print(f"  Device: {device}")
+    print(f"  Device: {device}" + (f" (Tensor Parallel: {n_gpus} GPUs)" if n_gpus > 1 else ""))
     print(f"{'=' * 60}\n")
 
     model.train()
@@ -446,7 +532,7 @@ def train_model(model, dataset, epochs, lr, bs, device):
     for ep in range(1, epochs + 1):
         total_loss, nb = 0.0, 0
         for batch in loader:
-            batch = batch.to(device)
+            batch = batch.to(primary_device)
             _, loss = model(batch, labels=batch)
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
@@ -455,6 +541,10 @@ def train_model(model, dataset, epochs, lr, bs, device):
             scheduler.step()
             total_loss += loss.item()
             nb += 1
+
+        # 多卡时同步
+        if n_gpus > 1:
+            torch.cuda.synchronize()
 
         avg = total_loss / nb
         gs = "  ".join(f"L{k}={v:.4f}" for k, v in model.gate_stats().items())
@@ -544,6 +634,13 @@ def main():
                     help="强制使用 FP32")
     ap.add_argument("--mirror", type=str, default=None,
                     help="HuggingFace 镜像地址，如 https://hf-mirror.com")
+    ap.add_argument("--tensor_parallel", action="store_true",
+                    help="启用张量并行（多GPU）")
+    ap.add_argument("--gpu_devices", type=str, default="0,1",
+                    help="指定GPU设备索引（0-based，受CUDA_VISIBLE_DEVICES影响），逗号分隔，如 '0,1'")
+    ap.add_argument("--engram_device", type=str, default="distribute",
+                    choices=["distribute", "gpu0", "gpu1"],
+                    help="Engram模块设备策略: distribute=随层分布, gpu0=全GPU0, gpu1=全GPU1")
     args = ap.parse_args()
 
     # ── HF 镜像 ──
@@ -554,7 +651,11 @@ def main():
         _setup_hf_mirror()
 
     # ── 设备 ──
-    device = _detect_device()
+    if args.tensor_parallel:
+        device, devices = _setup_tensor_parallel(args.gpu_devices)
+    else:
+        device = _detect_device()
+        devices = [device]
     dtype = torch.float32 if args.fp32 else None
     print(f"\nDevice: {device}")
 
@@ -568,6 +669,8 @@ def main():
         args.model, ecfg,
         use_engram=not args.no_engram,
         device=device, dtype=dtype,
+        tensor_parallel_devices=devices if args.tensor_parallel else None,
+        engram_device_strategy=args.engram_device if args.tensor_parallel else "distribute",
     )
 
     # ── 加载已有 Engram 权重 ──
@@ -576,7 +679,8 @@ def main():
         state = torch.load(args.load_engram, map_location=device, weights_only=True)
         model.engrams.load_state_dict(state)
         print("Engram weights loaded.")
-        model.to(device)
+        if not args.tensor_parallel:
+            model.to(device)
         test_recall(model, device)
         interactive(model, device)
         return
@@ -603,8 +707,10 @@ def main():
     print(f"Training samples: {len(dataset):,}  (seq_len={seq_len})")
 
     # ── 训练 ──
-    model.to(device)
-    train_model(model, dataset, args.epochs, args.lr, args.batch_size, device)
+    if not args.tensor_parallel:
+        model.to(device)
+    train_model(model, dataset, args.epochs, args.lr, args.batch_size, device,
+                tensor_parallel_devices=devices if args.tensor_parallel else None)
 
     # ── 保存 Engram 权重 ──
     if model.engrams:
