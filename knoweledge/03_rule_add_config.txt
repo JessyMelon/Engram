@@ -1,0 +1,14 @@
+## Rule系统新增配置
+步骤 1: 进入新增页
+  操作: 在欢迎页URL后面加上/ruleConfigInsert
+步骤 2: 填写配置
+  操作: 配置类型选config，产品code填slb，action填文档给出的action
+步骤 3: 选择用户类型
+  操作: 四选一，对于已有配置不能选默认配置否则会不生效或影响已有默认配置，建议选择针对具体用户填入user_id
+步骤 4: 刷新缓存
+  操作: 新增完成后刷缓存生效
+  注意: 重复配置只会生效一个
+
+新增Rule配置：访问/ruleConfigInsert，配置类型选config，产品code=slb，用户类型建议选具体用户填user_id避免影响默认配置，完成后刷缓存
+
+添加SLB Rule规则的步骤：URL加/ruleConfigInsert → 类型选config → 产品slb → 选用户类型（推荐具体用户）→ 刷缓存生效

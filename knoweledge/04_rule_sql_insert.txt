@@ -1,0 +1,10 @@
+## 指令: 通过SQL新增SLB Rule配置
+命令: INSERT IGNORE INTO rule_config (`product`, `component`, `action`, `user_id`, `bid`, `tag`, `config`, `config_var_type`, `config_type`, `concurrent_count_var`, `error_code`, `memo`, `gmt_created`, `gmt_modified`, `creator`, `modifier`, `is_deleted`) VALUES ('slb', NULL, '{action}', '{user_id}', NULL, '{tag}', '{config_value}', NULL, 'config', NULL, NULL, NULL, now(), now(), '{creator}', NULL, 0);
+参数: action=规则动作名(如vm_lbs_quota), user_id=租户UID, tag=标签格式(如uid_cn-gz-csa-d01), config=配置值, creator=修改人
+示例:
+>>> 给租户1773267149977932添加quota规则为290
+INSERT IGNORE INTO rule_config (`product`, `component`, `action`, `user_id`, `bid`, `tag`, `config`, `config_var_type`, `config_type`, `concurrent_count_var`, `error_code`, `memo`, `gmt_created`, `gmt_modified`, `creator`, `modifier`, `is_deleted`) VALUES ('slb', NULL, 'vm_lbs_quota', '1773267149977932', NULL, 'uid_cn-gz-csa-d01', '290', NULL, 'config', NULL, NULL, NULL, now(), now(), 'zfl.slb', NULL, 0);
+
+在rule_db数据库的rule_config表中用INSERT IGNORE INTO插入SLB规则配置，product=slb，config_type=config，is_deleted=0
+
+通过SQL直接往rule_config表插入规则，关键字段有product、action、user_id、tag、config、creator
