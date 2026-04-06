@@ -37,6 +37,9 @@ from dataclasses import dataclass, field
 warnings.filterwarnings("ignore", message=".*NumPy.*")
 os.environ.setdefault("NUMPY_EXPERIMENTAL_DTYPE_API", "1")  # 缓解部分兼容性问题
 
+# PyTorch CUDA 显存管理优化
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "expandable_segments:True")
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -307,20 +310,42 @@ class EngramLM(nn.Module):
         # ── 加载预训练模型 ──
         print(f"[1/4] Loading {model_name} ({dtype})...")
         if self.n_devices > 1:
-            self.base = AutoModelForCausalLM.from_pretrained(
-                model_name, torch_dtype=dtype, trust_remote_code=True,
-                device_map="auto",
-            )
+            try:
+                self.base = AutoModelForCausalLM.from_pretrained(
+                    model_name, torch_dtype=dtype, trust_remote_code=True,
+                    device_map="auto",
+                    attn_implementation="flash_attention_2",
+                )
+                print(f"  Using Flash Attention 2.")
+            except Exception:
+                self.base = AutoModelForCausalLM.from_pretrained(
+                    model_name, torch_dtype=dtype, trust_remote_code=True,
+                    device_map="auto",
+                )
+                print(f"  Using standard attention (Flash Attention 2 not available).")
             print(f"  Using device_map='auto' across {self.n_devices} GPUs")
         else:
-            self.base = AutoModelForCausalLM.from_pretrained(
-                model_name, torch_dtype=dtype, trust_remote_code=True,
-            )
+            try:
+                self.base = AutoModelForCausalLM.from_pretrained(
+                    model_name, torch_dtype=dtype, trust_remote_code=True,
+                    attn_implementation="flash_attention_2",
+                )
+                print(f"  Using Flash Attention 2.")
+            except Exception:
+                self.base = AutoModelForCausalLM.from_pretrained(
+                    model_name, torch_dtype=dtype, trust_remote_code=True,
+                )
+                print(f"  Using standard attention (Flash Attention 2 not available).")
         self.tokenizer = AutoTokenizer.from_pretrained(
             model_name, trust_remote_code=True,
         )
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        # ── 启用梯度检查点以节省显存 ──
+        if hasattr(self.base, 'gradient_checkpointing_enable'):
+            self.base.gradient_checkpointing_enable()
+            print("  Gradient checkpointing enabled.")
 
         # ── 冻结主干 ──
         print("[2/4] Freezing backbone...")
@@ -636,6 +661,9 @@ def load_eval_data(data_dir: str) -> Dict[str, Any]:
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def train_model(model, dataset, epochs, lr, bs, device, tensor_parallel_devices=None):
+    # 清理显存
+    torch.cuda.empty_cache()
+    
     loader = DataLoader(dataset, batch_size=bs, shuffle=True, drop_last=True)
     params = [p for p in model.parameters() if p.requires_grad]
     if not params:
@@ -830,9 +858,9 @@ def main():
     ap.add_argument("--data_dir", type=str, default=None,
                     help="本地知识文件目录（.txt/.md）")
     ap.add_argument("--epochs", type=int, default=20)
-    ap.add_argument("--batch_size", type=int, default=4)
+    ap.add_argument("--batch_size", type=int, default=2)
     ap.add_argument("--lr", type=float, default=1e-3)
-    ap.add_argument("--seq_len", type=int, default=256,
+    ap.add_argument("--seq_len", type=int, default=128,
                     help="训练序列长度")
     ap.add_argument("--save_engram", type=str, default="./engram_weights.pt",
                     help="保存 Engram 权重路径")
