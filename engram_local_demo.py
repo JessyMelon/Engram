@@ -462,16 +462,37 @@ class EngramLM(nn.Module):
         # 多卡时确保输入在正确设备
         if self.n_devices > 1:
             input_ids = input_ids.to(self.tensor_parallel_devices[0])
-            if labels is not None:
-                labels = labels.to(self.tensor_parallel_devices[0])
 
         try:
-            outputs = self.base(input_ids=input_ids, labels=labels, use_cache=False)
+            # 不传 labels，只获取 logits（避免在 GPU 1 上计算 cross_entropy 导致 OOM）
+            outputs = self.base(input_ids=input_ids, use_cache=False)
+            logits = outputs.logits
         finally:
             for h in hooks:
                 h.remove()
 
-        return outputs.logits, outputs.loss
+        loss = None
+        if labels is not None:
+            # 将 logits 和 labels 移到同一设备，优先选择显存更充足的设备（通常是 GPU 0）
+            # Shift: predict next token
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+
+            # 多卡时将 loss 计算移到 GPU 0（显存通常更充足，因为 lm_head 在 GPU 1）
+            if self.n_devices > 1:
+                target_device = self.tensor_parallel_devices[0]
+                shift_logits = shift_logits.to(target_device)
+                shift_labels = shift_labels.to(target_device)
+            else:
+                shift_labels = shift_labels.to(shift_logits.device)
+
+            loss = F.cross_entropy(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+                ignore_index=-100,
+            )
+
+        return logits, loss
 
     # ── 门控统计 ──
 
@@ -660,7 +681,14 @@ def load_eval_data(data_dir: str) -> Dict[str, Any]:
 # 7. 训练
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def train_model(model, dataset, epochs, lr, bs, device, tensor_parallel_devices=None):
+def train_model(model, dataset, epochs, lr, bs, device, tensor_parallel_devices=None,
+                accumulation_steps=1):
+    """
+    训练模型。
+    
+    Args:
+        accumulation_steps: 梯度累积步数，effective batch size = bs × accumulation_steps
+    """
     # 清理显存
     torch.cuda.empty_cache()
     
@@ -675,10 +703,15 @@ def train_model(model, dataset, epochs, lr, bs, device, tensor_parallel_devices=
 
     optimizer = torch.optim.AdamW(params, lr=lr, weight_decay=0.01)
     total_steps = epochs * len(loader)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(total_steps, 1))
+    # scheduler 按实际 optimizer.step() 次数调度
+    scheduler_steps = total_steps // accumulation_steps
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=max(scheduler_steps, 1))
 
+    effective_bs = bs * accumulation_steps
     print(f"\n{'=' * 60}")
     print(f"  Training: {epochs} epochs × {len(loader)} steps, bs={bs}")
+    if accumulation_steps > 1:
+        print(f"  Gradient Accumulation: {accumulation_steps} steps, effective bs={effective_bs}")
     print(f"  Trainable: {sum(p.numel() for p in params) / 1e6:.1f}M params")
     print(f"  Device: {device}" + (f" (Tensor Parallel: {n_gpus} GPUs)" if n_gpus > 1 else ""))
     print(f"{'=' * 60}\n")
@@ -690,16 +723,33 @@ def train_model(model, dataset, epochs, lr, bs, device, tensor_parallel_devices=
 
     for ep in range(1, epochs + 1):
         total_loss, nb = 0.0, 0
-        for batch in loader:
+        optimizer.zero_grad(set_to_none=True)
+        
+        for step_idx, batch in enumerate(loader):
             batch = batch.to(primary_device)
             _, loss = model(batch, labels=batch)
-            optimizer.zero_grad(set_to_none=True)
+            
+            # 梯度累积：loss 需要除以累积步数
+            if accumulation_steps > 1:
+                loss = loss / accumulation_steps
+            
             loss.backward()
+            total_loss += loss.item() * accumulation_steps  # 恢复原始 loss 值用于统计
+            nb += 1
+
+            # 每 accumulation_steps 步执行一次 optimizer.step()
+            if (step_idx + 1) % accumulation_steps == 0:
+                torch.nn.utils.clip_grad_norm_(params, 1.0)
+                optimizer.step()
+                scheduler.step()
+                optimizer.zero_grad(set_to_none=True)
+        
+        # 处理 epoch 末尾未满 accumulation_steps 的剩余梯度
+        if len(loader) % accumulation_steps != 0:
             torch.nn.utils.clip_grad_norm_(params, 1.0)
             optimizer.step()
             scheduler.step()
-            total_loss += loss.item()
-            nb += 1
+            optimizer.zero_grad(set_to_none=True)
 
         # 多卡时同步
         if n_gpus > 1:
@@ -881,6 +931,8 @@ def main():
     ap.add_argument("--engram_device", type=str, default="distribute",
                     choices=["distribute", "gpu0", "gpu1"],
                     help="Engram模块设备策略: distribute=随层分布, gpu0=全GPU0, gpu1=全GPU1")
+    ap.add_argument("--accumulation_steps", type=int, default=1,
+                    help="梯度累积步数，effective batch size = batch_size × accumulation_steps")
     args = ap.parse_args()
 
     # ── HF 镜像 ──
@@ -965,7 +1017,8 @@ def main():
     if not args.tensor_parallel:
         model.to(device)
     train_model(model, dataset, args.epochs, args.lr, args.batch_size, device,
-                tensor_parallel_devices=devices if args.tensor_parallel else None)
+                tensor_parallel_devices=devices if args.tensor_parallel else None,
+                accumulation_steps=args.accumulation_steps)
 
     # ── 保存 Engram 权重 ──
     if model.engrams:
