@@ -29,8 +29,8 @@ Engram × Pretrained LLM — 基于预训练模型的本地知识注入 Demo
 """
 
 # ── Imports ──────────────────────────────────────────────────────────
-import os, glob, math, time, argparse, inspect, warnings
-from typing import List
+import os, glob, math, time, argparse, inspect, warnings, importlib.util, sys
+from typing import List, Optional, Dict, Any
 from dataclasses import dataclass, field
 
 # 抑制 NumPy 1.x/2.x 兼容性警告
@@ -421,12 +421,6 @@ class EngramLM(nn.Module):
             def _make_hook(eng):
                 def _hook(module, args):
                     h = args[0]
-<<<<<<< Updated upstream
-                    # 动态迁移：确保 Engram 参数与隐藏态在同一设备
-                    if hasattr(eng, 'mh_emb') and eng.mh_emb.weight.device != h.device:
-                        eng.to(h.device)
-                    engram_out = eng(h, ids_np)
-=======
                     # 使用通用方式获取 Engram 模块的当前设备
                     try:
                         eng_device = next(eng.parameters()).device
@@ -436,7 +430,6 @@ class EngramLM(nn.Module):
                         pass
                     engram_out = eng(h, ids_np)
                     engram_out = engram_out.to(h.device)
->>>>>>> Stashed changes
                     return (h + engram_out,) + args[1:]
                 return _hook
             hooks.append(layer.register_forward_pre_hook(_make_hook(engram)))
@@ -512,6 +505,132 @@ def load_texts(data_dir):
     return "\n\n".join(texts) if texts else None
 
 
+def load_eval_data(data_dir: str) -> Dict[str, Any]:
+    """
+    扫描 data_dir 下的 *_eval.py 文件，动态导入并提取评估数据。
+    
+    返回字典包含:
+      - recall_prompts: 召回测试提示词列表（合并自所有 *_RECALL_PROMPTS 变量）
+      - expected_keywords: 期望关键词列表（合并自所有 *_EXPECTED_KEYWORDS 变量）
+      - prompt_to_keyword_idx: 每个提示词对应的关键词组索引列表
+    """
+    result = {
+        "recall_prompts": [],
+        "expected_keywords": [],
+        "prompt_to_keyword_idx": [],
+    }
+    
+    # 扫描 *_eval.py 文件
+    eval_files = sorted(glob.glob(os.path.join(data_dir, "*_eval.py")))
+    if not eval_files:
+        return result
+    
+    print(f"\nFound {len(eval_files)} evaluation file(s):")
+    
+    for eval_file in eval_files:
+        print(f"  Loading: {eval_file}")
+        
+        # 动态导入模块
+        module_name = os.path.splitext(os.path.basename(eval_file))[0]
+        spec = importlib.util.spec_from_file_location(module_name, eval_file)
+        if spec is None or spec.loader is None:
+            print(f"    [WARN] Cannot load {eval_file}, skipping")
+            continue
+        
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[module_name] = module
+        try:
+            spec.loader.exec_module(module)
+        except Exception as e:
+            print(f"    [WARN] Error loading {eval_file}: {e}, skipping")
+            continue
+        
+        # 遍历模块属性，查找匹配的变量
+        found_prompts = []
+        found_keywords = []
+        
+        for attr_name in dir(module):
+            if attr_name.startswith("_"):
+                continue
+            attr_val = getattr(module, attr_name)
+            
+            # 匹配 *_RECALL_PROMPTS
+            if attr_name.endswith("_RECALL_PROMPTS") and isinstance(attr_val, list):
+                found_prompts.append((attr_name, attr_val))
+                print(f"    Found {attr_name}: {len(attr_val)} prompts")
+            
+            # 匹配 *_EXPECTED_KEYWORDS
+            elif attr_name.endswith("_EXPECTED_KEYWORDS") and isinstance(attr_val, list):
+                found_keywords.append((attr_name, attr_val))
+                print(f"    Found {attr_name}: {len(attr_val)} keyword groups")
+        
+        # 合并数据并建立对应关系
+        # 假设同一模块中的 RECALL_PROMPTS 和 EXPECTED_KEYWORDS 配对
+        # EXPECTED_KEYWORDS 按知识条目分组，RECALL_PROMPTS 是展开的
+        # 需要从模块的 KNOWLEDGE_ENTRIES 中推断对应关系，或根据注释的条目分组来计算
+        
+        for prompts_name, prompts_list in found_prompts:
+            # 尝试找到对应的 keywords
+            prefix = prompts_name.replace("_RECALL_PROMPTS", "")
+            keywords_name = f"{prefix}_EXPECTED_KEYWORDS"
+            keywords_list = None
+            for kw_name, kw_val in found_keywords:
+                if kw_name == keywords_name:
+                    keywords_list = kw_val
+                    break
+            
+            if keywords_list is None:
+                # 没有配对的关键词，只添加 prompts
+                base_idx = len(result["expected_keywords"])
+                for prompt in prompts_list:
+                    result["recall_prompts"].append(prompt)
+                    result["prompt_to_keyword_idx"].append(-1)  # -1 表示无对应关键词
+            else:
+                # 有配对的关键词，需要建立对应关系
+                # 尝试从 KNOWLEDGE_ENTRIES 推断每组的提示词数量
+                entries_name = "KNOWLEDGE_ENTRIES"
+                entries_list = getattr(module, entries_name, None)
+                
+                base_kw_idx = len(result["expected_keywords"])
+                result["expected_keywords"].extend(keywords_list)
+                
+                if entries_list and isinstance(entries_list, list):
+                    # 从 KNOWLEDGE_ENTRIES 获取每个条目的提示词数量
+                    prompt_idx = 0
+                    for entry_idx, entry in enumerate(entries_list):
+                        entry_prompts = entry.get("recall_prompts", [])
+                        n_prompts = len(entry_prompts)
+                        for _ in range(n_prompts):
+                            if prompt_idx < len(prompts_list):
+                                result["recall_prompts"].append(prompts_list[prompt_idx])
+                                result["prompt_to_keyword_idx"].append(base_kw_idx + entry_idx)
+                                prompt_idx += 1
+                    # 处理剩余的 prompts（如果有）
+                    while prompt_idx < len(prompts_list):
+                        result["recall_prompts"].append(prompts_list[prompt_idx])
+                        result["prompt_to_keyword_idx"].append(-1)
+                        prompt_idx += 1
+                else:
+                    # 没有 KNOWLEDGE_ENTRIES，尝试平均分配
+                    n_prompts = len(prompts_list)
+                    n_groups = len(keywords_list)
+                    prompts_per_group = n_prompts // n_groups if n_groups > 0 else n_prompts
+                    
+                    for i, prompt in enumerate(prompts_list):
+                        result["recall_prompts"].append(prompt)
+                        if n_groups > 0:
+                            group_idx = min(i // prompts_per_group, n_groups - 1)
+                            result["prompt_to_keyword_idx"].append(base_kw_idx + group_idx)
+                        else:
+                            result["prompt_to_keyword_idx"].append(-1)
+    
+    if result["recall_prompts"]:
+        print(f"\nTotal: {len(result['recall_prompts'])} prompts, "
+              f"{len(result['expected_keywords'])} keyword groups")
+    
+    return result
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 7. 训练
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -572,11 +691,35 @@ def train_model(model, dataset, epochs, lr, bs, device, tensor_parallel_devices=
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
-def test_recall(model, device):
+def test_recall(model, device, recall_prompts: Optional[List[str]] = None,
+                expected_keywords: Optional[List[List[str]]] = None,
+                prompt_to_keyword_idx: Optional[List[int]] = None):
+    """
+    知识召回测试。
+    
+    Args:
+        model: 模型实例
+        device: 设备
+        recall_prompts: 可选的召回提示词列表，不提供则使用默认的 RECALL_PROMPTS
+        expected_keywords: 可选的期望关键词列表（按知识条目分组）
+        prompt_to_keyword_idx: 每个提示词对应的关键词组索引列表
+    """
+    # 使用提供的提示词或默认提示词
+    prompts = recall_prompts if recall_prompts is not None else RECALL_PROMPTS
+    
     print(f"\n{'=' * 60}")
     print("  Knowledge Recall Test")
+    if expected_keywords:
+        print(f"  ({len(prompts)} prompts, {len(expected_keywords)} keyword groups)")
     print(f"{'=' * 60}")
-    for prompt in RECALL_PROMPTS:
+    
+    # 统计信息
+    total_prompts = len(prompts)
+    total_keywords_hit = 0
+    total_keywords_expected = 0
+    per_group_stats = {}  # group_idx -> {"hit": int, "total": int, "prompts": int}
+    
+    for i, prompt in enumerate(prompts):
         ids = torch.tensor(
             [model.tokenizer.encode(prompt)], device=device
         )
@@ -584,8 +727,65 @@ def test_recall(model, device):
         text = model.tokenizer.decode(out[0], skip_special_tokens=True)
         # 只显示生成的部分
         generated = text[len(prompt):].strip()
+        
         print(f"\n  [{prompt}]")
         print(f"  → {generated[:200]}")
+        
+        # 关键词评估
+        if expected_keywords and prompt_to_keyword_idx:
+            kw_idx = prompt_to_keyword_idx[i] if i < len(prompt_to_keyword_idx) else -1
+            if kw_idx >= 0 and kw_idx < len(expected_keywords):
+                keywords = expected_keywords[kw_idx]
+                hits = []
+                misses = []
+                # 检查每个关键词是否出现在生成文本中
+                generated_lower = generated.lower()
+                for kw in keywords:
+                    if kw.lower() in generated_lower:
+                        hits.append(kw)
+                    else:
+                        misses.append(kw)
+                
+                hit_count = len(hits)
+                total_count = len(keywords)
+                total_keywords_hit += hit_count
+                total_keywords_expected += total_count
+                
+                # 更新每组统计
+                if kw_idx not in per_group_stats:
+                    per_group_stats[kw_idx] = {"hit": 0, "total": 0, "prompts": 0}
+                per_group_stats[kw_idx]["hit"] += hit_count
+                per_group_stats[kw_idx]["total"] += total_count
+                per_group_stats[kw_idx]["prompts"] += 1
+                
+                # 打印关键词命中情况
+                hit_rate = hit_count / total_count * 100 if total_count > 0 else 0
+                print(f"  📊 Keywords: {hit_count}/{total_count} ({hit_rate:.0f}%)")
+                if hits:
+                    print(f"     ✓ Hit: {', '.join(hits)}")
+                if misses:
+                    print(f"     ✗ Miss: {', '.join(misses)}")
+    
+    # 打印总体评估摘要
+    if expected_keywords and prompt_to_keyword_idx and total_keywords_expected > 0:
+        print(f"\n{'=' * 60}")
+        print("  Recall Evaluation Summary")
+        print(f"{'=' * 60}")
+        
+        # 总体命中率
+        overall_hit_rate = total_keywords_hit / total_keywords_expected * 100
+        print(f"\n  Overall Keyword Hit Rate: {total_keywords_hit}/{total_keywords_expected} "
+              f"({overall_hit_rate:.1f}%)")
+        
+        # 每组统计
+        print(f"\n  Per-Group Statistics:")
+        for group_idx in sorted(per_group_stats.keys()):
+            stats = per_group_stats[group_idx]
+            group_hit_rate = stats["hit"] / stats["total"] * 100 if stats["total"] > 0 else 0
+            print(f"    Group {group_idx + 1}: {stats['hit']}/{stats['total']} hits "
+                  f"({group_hit_rate:.0f}%) across {stats['prompts']} prompt(s)")
+        
+        print(f"\n{'=' * 60}")
 
 
 def interactive(model, device):
@@ -693,15 +893,30 @@ def main():
         print("Engram weights loaded.")
         if not args.tensor_parallel:
             model.to(device)
-        test_recall(model, device)
+        
+        # 加载评估数据（如果指定了 data_dir）
+        eval_data = None
+        if args.data_dir:
+            eval_data = load_eval_data(args.data_dir)
+        
+        if eval_data and eval_data.get("recall_prompts"):
+            test_recall(model, device,
+                       recall_prompts=eval_data["recall_prompts"],
+                       expected_keywords=eval_data["expected_keywords"],
+                       prompt_to_keyword_idx=eval_data["prompt_to_keyword_idx"])
+        else:
+            test_recall(model, device)
         interactive(model, device)
         return
 
     # ── 准备数据 ──
     text = None
+    eval_data = None
     if args.data_dir:
         print(f"\nLoading texts from {args.data_dir}...")
         text = load_texts(args.data_dir)
+        # 加载评估数据
+        eval_data = load_eval_data(args.data_dir)
     if text is None:
         print("\nUsing built-in example knowledge...")
         text = EXAMPLE_KNOWLEDGE
@@ -730,7 +945,13 @@ def main():
         print(f"Engram weights saved to {args.save_engram}")
 
     # ── 知识召回 + 交互 ──
-    test_recall(model, device)
+    if eval_data and eval_data.get("recall_prompts"):
+        test_recall(model, device,
+                   recall_prompts=eval_data["recall_prompts"],
+                   expected_keywords=eval_data["expected_keywords"],
+                   prompt_to_keyword_idx=eval_data["prompt_to_keyword_idx"])
+    else:
+        test_recall(model, device)
     interactive(model, device)
 
 
