@@ -260,6 +260,48 @@ def _detect_device():
     return torch.device("cpu")
 
 
+def _get_config_attr(config, attr_name):
+    """Get config attribute, handling nested configs (e.g., Gemma4's text_config).
+    
+    多模态模型（如 Gemma 4）的配置结构可能不同于纯文本模型：
+    - 标准文本模型: config.hidden_size
+    - 多模态模型: config.text_config.hidden_size 或 config.llm_config.hidden_size
+    """
+    # 直接在顶层查找
+    if hasattr(config, attr_name):
+        val = getattr(config, attr_name)
+        # 确保不是 None（有些模型顶层有属性但值为 None）
+        if val is not None:
+            return val
+    # 在 text_config 子配置中查找（多模态模型如 Gemma4）
+    if hasattr(config, 'text_config') and hasattr(config.text_config, attr_name):
+        val = getattr(config.text_config, attr_name)
+        if val is not None:
+            return val
+    # 在 llm_config 子配置中查找
+    if hasattr(config, 'llm_config') and hasattr(config.llm_config, attr_name):
+        val = getattr(config.llm_config, attr_name)
+        if val is not None:
+            return val
+    # 处理属性名映射（如 d_model -> hidden_size）
+    attr_aliases = {
+        'hidden_size': ['d_model', 'model_dim', 'embed_dim'],
+        'num_hidden_layers': ['n_layer', 'num_layers', 'n_layers'],
+        'num_attention_heads': ['n_head', 'num_heads', 'n_heads'],
+    }
+    if attr_name in attr_aliases:
+        for alias in attr_aliases[attr_name]:
+            if hasattr(config, alias):
+                val = getattr(config, alias)
+                if val is not None:
+                    return val
+            if hasattr(config, 'text_config') and hasattr(config.text_config, alias):
+                val = getattr(config.text_config, alias)
+                if val is not None:
+                    return val
+    raise AttributeError(f"Cannot find '{attr_name}' in config or its sub-configs: {config}")
+
+
 def _setup_tensor_parallel(gpu_devices_str: str):
     """设置多GPU环境，返回 (主设备, 设备列表)"""
     if not torch.cuda.is_available():
@@ -363,10 +405,14 @@ class EngramLM(nn.Module):
         self._lm_head = self.base.lm_head
         self._rotary = getattr(backbone, "rotary_emb", None)
 
-        hs = self.base.config.hidden_size
-        nl = self.base.config.num_hidden_layers
+        # 使用辅助函数获取配置属性，兼容多模态模型（如 Gemma4）
+        hs = _get_config_attr(self.base.config, 'hidden_size')
+        nl = _get_config_attr(self.base.config, 'num_hidden_layers')
         self.max_seq_len = min(
-            getattr(self.base.config, "max_position_embeddings", 2048), 1024
+            getattr(self.base.config, "max_position_embeddings", 
+                    getattr(getattr(self.base.config, 'text_config', None), 
+                            'max_position_embeddings', 2048) if hasattr(self.base.config, 'text_config') else 2048), 
+            1024
         )
 
         # 探测 decoder layer 接受的参数
