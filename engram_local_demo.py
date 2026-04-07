@@ -308,16 +308,19 @@ def _find_transformer_layers(model):
     支持多种模型架构：
     - 标准 HF 模型 (Qwen, Llama, Mistral): model.model.layers
     - GPT-2 / GPT-Neo 系列: model.transformer.h
-    - 多模态模型 (Gemma 4等): model.language_model.model.layers
+    - 多模态模型 (Gemma 4 ForConditionalGeneration): model.model.language_model.layers
+    - 多模态模型 (旧版): model.language_model.model.layers
     - 其他可能的路径
     """
     # 常见路径列表，按优先级排序
     candidates = [
-        # 标准 HF 模型 (Qwen, Llama, Mistral)
+        # 标准 HF 模型 (Qwen, Llama, Mistral, Gemma4ForCausalLM)
         lambda m: m.model.layers,
         # GPT-2 / GPT-Neo 系列
         lambda m: m.transformer.h,
-        # 多模态模型 (Gemma 4等) - language_model 子模块
+        # 多模态模型 (Gemma4ForConditionalGeneration) - model.language_model.layers
+        lambda m: m.model.language_model.layers,
+        # 多模态模型 (旧版结构) - language_model.model.layers
         lambda m: m.language_model.model.layers,
         # 其他可能的路径
         lambda m: m.model.decoder.layers,
@@ -344,29 +347,39 @@ def _find_backbone_component(model, component_name):
     # 定义每个组件可能的属性名和路径
     component_paths = {
         'embed_tokens': [
-            # 标准 HF 模型
+            # 标准 HF 模型 (Qwen, Llama, Mistral, Gemma4ForCausalLM)
             lambda m: m.model.embed_tokens,
             # GPT-2 系列
             lambda m: m.transformer.wte,
-            # 多模态模型
+            # 多模态模型 (Gemma4ForConditionalGeneration)
+            lambda m: m.model.language_model.embed_tokens,
+            # 多模态模型 (旧版结构)
             lambda m: m.language_model.model.embed_tokens,
             lambda m: m.model.model.embed_tokens,
         ],
         'norm': [
-            # 标准 HF 模型
+            # 标准 HF 模型 (Qwen, Llama, Mistral, Gemma4ForCausalLM)
             lambda m: m.model.norm,
             # GPT-2 系列
             lambda m: m.transformer.ln_f,
-            # 多模态模型
+            # 多模态模型 (Gemma4ForConditionalGeneration)
+            lambda m: m.model.language_model.norm,
+            # 多模态模型 (旧版结构)
             lambda m: m.language_model.model.norm,
             lambda m: m.model.model.norm,
         ],
         'lm_head': [
             lambda m: m.lm_head,
+            # 多模态模型 (Gemma4ForConditionalGeneration)
+            lambda m: m.model.lm_head,
             lambda m: m.language_model.lm_head,
         ],
         'rotary_emb': [
+            # 标准 HF 模型
             lambda m: m.model.rotary_emb,
+            # 多模态模型 (Gemma4ForConditionalGeneration)
+            lambda m: m.model.language_model.rotary_emb,
+            # 多模态模型 (旧版结构)
             lambda m: m.language_model.model.rotary_emb,
             lambda m: m.model.model.rotary_emb,
         ],
