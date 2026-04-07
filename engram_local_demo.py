@@ -302,6 +302,87 @@ def _get_config_attr(config, attr_name):
     raise AttributeError(f"Cannot find '{attr_name}' in config or its sub-configs: {config}")
 
 
+def _find_transformer_layers(model):
+    """Find transformer decoder layers in various model architectures.
+    
+    支持多种模型架构：
+    - 标准 HF 模型 (Qwen, Llama, Mistral): model.model.layers
+    - GPT-2 / GPT-Neo 系列: model.transformer.h
+    - 多模态模型 (Gemma 4等): model.language_model.model.layers
+    - 其他可能的路径
+    """
+    # 常见路径列表，按优先级排序
+    candidates = [
+        # 标准 HF 模型 (Qwen, Llama, Mistral)
+        lambda m: m.model.layers,
+        # GPT-2 / GPT-Neo 系列
+        lambda m: m.transformer.h,
+        # 多模态模型 (Gemma 4等) - language_model 子模块
+        lambda m: m.language_model.model.layers,
+        # 其他可能的路径
+        lambda m: m.model.decoder.layers,
+        lambda m: m.model.model.layers,
+        lambda m: m.decoder.layers,
+    ]
+    for fn in candidates:
+        try:
+            layers = fn(model)
+            if layers is not None and len(layers) > 0:
+                return layers
+        except (AttributeError, TypeError):
+            continue
+    return None
+
+
+def _find_backbone_component(model, component_name):
+    """Find backbone component (embed_tokens, norm, lm_head, rotary_emb) in various architectures.
+    
+    Args:
+        model: 模型实例
+        component_name: 组件名称，支持 'embed_tokens', 'norm', 'lm_head', 'rotary_emb'
+    """
+    # 定义每个组件可能的属性名和路径
+    component_paths = {
+        'embed_tokens': [
+            # 标准 HF 模型
+            lambda m: m.model.embed_tokens,
+            # GPT-2 系列
+            lambda m: m.transformer.wte,
+            # 多模态模型
+            lambda m: m.language_model.model.embed_tokens,
+            lambda m: m.model.model.embed_tokens,
+        ],
+        'norm': [
+            # 标准 HF 模型
+            lambda m: m.model.norm,
+            # GPT-2 系列
+            lambda m: m.transformer.ln_f,
+            # 多模态模型
+            lambda m: m.language_model.model.norm,
+            lambda m: m.model.model.norm,
+        ],
+        'lm_head': [
+            lambda m: m.lm_head,
+            lambda m: m.language_model.lm_head,
+        ],
+        'rotary_emb': [
+            lambda m: m.model.rotary_emb,
+            lambda m: m.language_model.model.rotary_emb,
+            lambda m: m.model.model.rotary_emb,
+        ],
+    }
+    
+    paths = component_paths.get(component_name, [])
+    for fn in paths:
+        try:
+            component = fn(model)
+            if component is not None:
+                return component
+        except (AttributeError, TypeError):
+            continue
+    return None
+
+
 def _setup_tensor_parallel(gpu_devices_str: str):
     """设置多GPU环境，返回 (主设备, 设备列表)"""
     if not torch.cuda.is_available():
@@ -395,15 +476,19 @@ class EngramLM(nn.Module):
             p.requires_grad = False
         self.base.eval()
 
-        # ── 探测模型内部结构 ──
-        backbone = getattr(self.base, "model", getattr(self.base, "transformer", None))
-        if backbone is None:
-            raise RuntimeError("Cannot detect model backbone (.model or .transformer)")
-        self._embed = getattr(backbone, "embed_tokens", getattr(backbone, "wte", None))
-        self._layers = getattr(backbone, "layers", getattr(backbone, "h", None))
-        self._norm = getattr(backbone, "norm", getattr(backbone, "ln_f", None))
-        self._lm_head = self.base.lm_head
-        self._rotary = getattr(backbone, "rotary_emb", None)
+        # ── 探测模型内部结构（支持多种架构，包括多模态模型如 Gemma 4）──
+        self._layers = _find_transformer_layers(self.base)
+        if self._layers is None:
+            raise ValueError(
+                f"Cannot find transformer layers in {type(self.base).__name__}. "
+                f"Supported architectures: model.model.layers, model.transformer.h, "
+                f"model.language_model.model.layers, etc. "
+                f"Please check model architecture and update _find_transformer_layers()."
+            )
+        self._embed = _find_backbone_component(self.base, 'embed_tokens')
+        self._norm = _find_backbone_component(self.base, 'norm')
+        self._lm_head = _find_backbone_component(self.base, 'lm_head')
+        self._rotary = _find_backbone_component(self.base, 'rotary_emb')
 
         # 使用辅助函数获取配置属性，兼容多模态模型（如 Gemma4）
         hs = _get_config_attr(self.base.config, 'hidden_size')
