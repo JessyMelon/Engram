@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.com/engram-sample.schema.json",
+  "title": "EngramSample",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "sample_id",
+    "action",
+    "sample_type",
+    "anchor_text",
+    "content",
+    "paraphrases",
+    "contrast_with",
+    "must_contain",
+    "negative_terms",
+    "confidence"
+  ],
+  "properties": {
+    "sample_id": {
+      "type": "string",
+      "minLength": 6,
+      "description": "全局唯一的样本 ID"
+    },
+    "action": {
+      "type": "string",
+      "minLength": 1,
+      "description": "API action 名，必须保留原始英文 token"
+    },
+    "sample_type": {
+      "type": "string",
+      "enum": [
+        "fact",
+        "default",
+        "constraint",
+        "error_recovery",
+        "procedure",
+        "contrast"
+      ]
+    },
+    "anchor_text": {
+      "type": "string",
+      "minLength": 8,
+      "description": "供 Engram 形成强 trigram 的短锚点文本"
+    },
+    "content": {
+      "type": "string",
+      "minLength": 80,
+      "description": "主训练文本，建议 4~6 句"
+    },
+    "paraphrases": {
+      "type": "array",
+      "minItems": 3,
+      "maxItems": 6,
+      "items": {
+        "type": "string",
+        "minLength": 20
+      },
+      "description": "多入口触发改写，不是简单近义句"
+    },
+    "contrast_with": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "相似 action / field / 规则名"
+    },
+    "must_contain": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 8,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "评测时强制要求命中的关键 token"
+    },
+    "negative_terms": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "用于区分负例或相似知识的 token"
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1,
+      "description": "模型对当前样本质量的自评估"
+    }
+  }
+}
