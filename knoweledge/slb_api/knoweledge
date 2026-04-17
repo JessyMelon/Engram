@@ -1,0 +1,383 @@
+SLB API协议参数分为输入参数和输出参数。
+输入参数:
+- action: 必选，string，操作接口名
+- session: 必选，string，系统颁发给用户的调用接口会话key
+- sign: 必选，string，签名结果串
+- sign_type: 可选，string，签名方式，默认MD5
+- timestamp: 必选，timestamp，格式yyyy-mm-dd hh:mi:ss，有效时间8分钟
+输出参数:
+- code: 必选，string，成功时为"200"，其他错误参考协议层错误代码表
+- msg: 必选，string，成功时为"successful"
+
+SLB API签名机制:
+当需要调用SLB API时，将所有参数（除sign和sign_type）按参数名字符升序排列串联，格式为p1=v1&p2=v2&p3=v3，构成待签名数据。按sign_type指定的方式对待签名数据签名，最终采用Base64编码作为签名串。
+签名示例: action=create_loadbalancer&eip_type=internet&lb_type=compact&region_no=cn-test1
+签名注意事项: 没有值的参数无需传递也无需包含到待签名数据中。存在特殊字符需做URL Encoding时，签名使用原生值而非encoding后的值。
+
+SLB API签名方式:
+- MD5: 待签名数据 + serviceSecretKey 的MD5摘要进行Base64编码后作为签名串
+- DSA: 用户使用自己的密钥对待签名数据进行DSA签名，系统使用用户公钥校验
+- HmacSHA1: 采用Mac算法使用serviceSecretKey计算签名
+- HmacSHA256: 采用Mac算法使用serviceSecretKey计算签名
+- HmacMD5: 采用Mac算法使用serviceSecretKey计算签名
+
+SLB API返回格式为JSON，成功示例: {"code":200,"msg":"successful","data":{...}}
+错误示例: {"code":-100,"msg":"system error"}，出错时JSON结果中没有data节点。
+
+调用SLB API接口时需要传递协议参数action、session、sign、timestamp，签名机制是将所有参数按名称升序排列拼接后用MD5等方式签名再Base64编码。SLB API签名支持MD5、DSA、HmacSHA1、HmacSHA256、HmacMD5五种方式，其中MD5是默认签名方式，签名时需要拼接serviceSecretKey。返回结果统一为JSON格式。
+
+SLB API的签名流程：首先收集除sign和sign_type外的所有参数，按参数名升序排列并用&连接成字符串，然后使用serviceSecretKey配合指定的签名方式（默认MD5）计算摘要，最后对摘要结果进行Base64编码得到sign值。支持的签名方式包括MD5、DSA、HmacSHA1、HmacSHA256和HmacMD5。timestamp参数有效期为8分钟。
+
+## create_loadbalancer - 创建SLB负载均衡实例
+
+当需要创建一个新的SLB负载均衡实例时，调用create_loadbalancer接口。
+接口路径: action=create_loadbalancer
+必选参数:
+- region_no: string，LoadBalancer所属的region_no
+- bid: string，渠道ID，长度1-80
+- aliyun_idkp: string，阿里云云帐号ID
+可选参数:
+- eip: string，关联的IP地址，不传则系统分配，VPC类型必传
+- eip_type: string，internet或intranet，默认internet
+- gw_type: string，vpc表示VPC实例，any_vpc表示any VPC实例，不传为经典实例
+- vpc_instance_id: string，VPC实例必传
+- tunnel_id: int，VPC实例必传，VxLan协议的VNI
+- ha_type: string，single_site(单机房无灾备)/double_site(双机房有灾备)
+- ip_version: string，默认ipv4，传入ipv6创建v6实例
+- mode: string，nat/fnat/fnat_ext，默认fnat
+- lb_name: string，同一aliyun_idkp下必须唯一，长度1-80
+- su_name: string，指定service_unit，不传则系统分配
+- site_id: string，指定eip流量走的机房
+- backup_site_id: string，主机房不可用时的备机房
+- lb_id: string，指定实例ID，不传则系统生成，同一aliyun_idkp下唯一
+- enable_vpc_vip_flow: string，on/off，默认on，控制VPC LB创建时是否立即引流
+成功返回: {"code":200,"msg":"successful","data":{"lb_id":"123","eip":"10.250.6.36","site_id":"1"}}
+常见错误码:
+- -2620 NoAvailableIp: 没有可用IP
+- -2625 LbNameExists: lb_name已存在，返回已存在lb信息
+- -2633 LbIdExists: lb_id已存在
+- -2619 RegionIdIsEmpty: Region ID为空
+- -2617 EipTypeNotSupport: IP类型错误
+- -2228 AllocateVpcInstanceFail: 申请VPC XGW资源失败
+- -2229 AllocatePublicIpFail: VPC XGW分配IP失败
+
+要创建SLB实例，调用create_loadbalancer接口传入region_no、bid和aliyun_idkp三个必选参数。创建VPC类型实例需要额外传入gw_type=vpc、vpc_instance_id和tunnel_id。如果指定lb_name，同一aliyun_idkp下必须唯一，重复会返回-2625错误码并带回已有实例信息。create_loadbalancer支持通过ha_type指定单机房或双机房灾备模式。
+
+create_loadbalancer接口用于创建SLB负载均衡实例并分配服务IP和lb_id。经典网络实例只需region_no、bid、aliyun_idkp即可创建；VPC网络实例还需传gw_type=vpc、eip、vpc_instance_id、tunnel_id。创建ipv6实例需设ip_version=ipv6且目前仅支持internet类型。默认转发模式为fnat，enable_vpc_vip_flow默认on表示创建后立即引流。
+## delete_loadbalancer + config_loadbalancer - 删除和配置SLB实例
+
+当需要删除一个SLB负载均衡实例时，调用delete_loadbalancer接口。
+接口路径: action=delete_loadbalancer
+必选参数:
+- region_no: string，LoadBalancer所属的region_no
+- lb_id: string，LoadBalancer的唯一标识
+- aliyun_idkp: string，阿里云云帐号ID
+可选参数:
+- bid: string，渠道ID
+说明: delete_loadbalancer会清除LoadBalancer相关的所有配置，如果LB上还有VIP也会一并被删除。
+成功返回: {"code":200,"msg":"successful"}
+常见错误码:
+- -2601 LbIdIsEmpty: LB ID为空
+- -2334 VipStopFailure: 停止VIP异常
+- -2249 ServiceIsStarting: 删除lb时有监听正在启动中
+
+当需要批量激活或停用SLB实例下所有VIP时，调用config_loadbalancer接口。
+接口路径: action=config_loadbalancer
+必选参数:
+- region_no: string，LoadBalancer所属的region_no
+- lb_id: string，LoadBalancer的唯一标识
+- status: string，active或inactive
+- aliyun_idkp: string，阿里云云帐号ID
+可选参数:
+- bid: string，渠道ID
+- mode: string，fnat/fnat_ext/nat
+说明: config_loadbalancer设置status=active时将LB中所有VIP都激活，status=inactive时将所有VIP都停用。
+成功返回: {"code":200,"msg":"successful"}
+常见错误码:
+- -2622 LbConfigFailure: 配置LB失败
+
+delete_loadbalancer接口用于删除SLB实例，传入region_no、lb_id和aliyun_idkp即可执行删除操作，删除时会清除所有配置和VIP。config_loadbalancer接口用于批量控制LB下所有VIP的状态，status=active激活全部VIP，status=inactive停用全部VIP。
+
+删除SLB实例调用delete_loadbalancer，需要region_no和lb_id定位实例。如果实例上还有VIP会一并删除。如果有监听正在启动中（-2249错误），需要等待启动完成后再删除。config_loadbalancer通过status参数批量控制所有VIP的启停状态。
+## query_loadbalancer_info + list_loadbalancers - 查询SLB实例信息
+
+当需要查询某个SLB实例的详细信息时，调用query_loadbalancer_info接口。
+接口路径: action=query_loadbalancer_info
+必选参数:
+- region_no: string，LoadBalancer所属的region_no
+- lb_id: string，LoadBalancer的唯一标识
+- aliyun_idkp: string，阿里云云帐号ID
+可选参数:
+- bid: string，渠道ID
+说明: query_loadbalancer_info根据lb_id查询LoadBalancer信息，返回信息包括LB属性、前端端口列表frontend_port、VM列表vm_list、RS列表rs_list、ha_type、site_id、backup_site_id、gw_type、eip、eip_type、mode等。
+成功返回: {"code":200,"data":{"vm_list":[],"su_name":"suC","gw_type":"classic","lb_id":"xxx","eip":"10.189.104.141","eip_type":"intranet","mode":"fnat","frontend_port":[],"ha_type":"double_site","site_id":"t1","backup_site_id":"t2","rs_list":[...]},"msg":"successful"}
+常见错误码:
+- -2601 LbIdIsEmpty: LB ID为空
+- -2610 LbIdNotExist: LB ID不存在
+
+当需要查询用户所有SLB实例列表时，调用list_loadbalancers接口（高危接口）。
+接口路径: action=list_loadbalancers
+必选参数:
+- region_no: string
+- aliyun_idkp: string
+- bid: string
+可选参数:
+- tunnel_id: int，VPC类型后端RS的tunnel_id
+注意: list_loadbalancers是高危接口，由于存量数据存在idkp混用，可能返回不属于自己的lb实例。操作前务必用query_loadbalancer_info再次确认idkp、bid、监听、rs等配置是否符合预期。
+成功返回: {"code":200,"msg":"successful","data":{"lbs":["lb1","lb2"]}}
+
+查询单个SLB实例详情用query_loadbalancer_info，传入region_no和lb_id即可获取包括vm_list、frontend_port列表、rs_list、ha_type、gw_type等完整信息。查询用户所有实例列表用list_loadbalancers，但这是高危接口，因为idkp混用可能返回非自己的实例，需要额外校验。
+
+query_loadbalancer_info接口返回SLB实例的完整属性，包含负载均衡的网络类型gw_type、IP地址eip、转发模式mode、灾备类型ha_type、前端端口列表和后端RS列表。list_loadbalancers接口虽然能批量查询用户所有LB，但由于历史数据idkp混用问题被标记为高危接口，建议查询后用query_loadbalancer_info逐一确认。
+
+
+## create_vip - 创建VIP监听
+
+当需要在SLB实例中创建VIP监听时，调用create_vip接口。
+接口路径: action=create_vip
+必选参数:
+- region_no: string，LoadBalancer所属的region_no
+- lb_id: string，LoadBalancer的唯一标识
+- listeners: string，Listener结构的JSON列表，一次最多添加10个Listener
+- aliyun_idkp: string，阿里云云帐号ID
+可选参数:
+- bid: string，渠道ID
+Listener结构说明:
+- protocol: 必选，支持tcp、http、https、udp、tcps
+- frontend_port: 必选，int，前端端口1-65535
+- backend_port: 可选，int，后端端口1-65535
+- rs_pool_name: 可选，string，RS Pool名称。backend_port和rs_pool_name两者必传其一，若都传以rs_pool_name为准
+- bandwidth: 可选，出流量带宽上限，单位Bytes/s，支持k/K/m/M/g/G后缀，最大4GBytes/s，传"0"表示不限
+- status: 可选，active或inactive，默认inactive
+- config: 可选，TcpConfig或UdpConfig的JSON字符串
+说明: create_vip保证事务性，添加的Listener要么全部成功要么全部失败。对于https的VIP必须绑定证书。proxy_protocol_v2_enabled为off时不允许带proxy_fields字段。
+成功返回: {"code":200,"msg":"successful"}
+常见错误码:
+- -2301 VipExist: VIP已经存在
+- -2315 VipTooManyListeners: 一次传入的Listener数目过多（上限10个）
+- -2325 VipProtocolNotSupport: VIP协议类型不合法
+- -2326 VipBackendPortIsEmpty: Compact类型LB的VIP后端端口为空
+- -2904 CertKeyNotExisted: 证书和私钥不存在
+- -2905 CertKeyIdEmpty: 证书ID为空
+- -2308 VipNotMatchRspool: VIP协议类型和RSPool协议类型不一致
+
+create_vip接口用于在SLB实例中创建VIP监听，支持tcp、http、https、udp、tcps五种协议。传入listeners参数为Listener结构JSON列表，每个Listener需指定protocol和frontend_port，后端可通过backend_port或rs_pool_name指定。create_vip具有事务性，一次最多10个Listener全部成功或全部失败。HTTPS类型VIP必须绑定证书。
+
+在SLB中创建VIP监听调用create_vip接口，Listener结构中protocol和frontend_port为必选，后端服务通过backend_port直接指定端口或通过rs_pool_name关联RSPool。支持的协议包括tcp、http、https、udp、tcps。create_vip是事务性操作一次最多10个。创建https监听时必须绑定SSL证书否则报-2904错误。
+## create_rs_pool + delete_rs_pool - 创建和删除RS Pool
+
+当需要创建一个RS Pool后端服务器池时，调用create_rs_pool接口。
+接口路径: action=create_rs_pool
+必选参数:
+- region_no: string，LoadBalancer所属的region_no
+- rs_pool_name: string，RS Pool名称，长度1-80，同一用户下必须唯一
+- aliyun_idkp: string，阿里云云帐号ID
+- bid: string，渠道ID
+可选参数:
+- port: int，端口1-65535。如果在rspool上设置port，则rspool中的rs不要再设port；如果需要每个rs使用不同port，则不要在rspool上设port
+- type: string，传app则创建应用型rspool，不传默认普通rspool
+- config: string，type=app时生效，支持scheduler、sticky_session、check参数
+成功返回: {"code":200,"msg":"successful","data":{"name":"testpool","port":80}}
+常见错误码:
+- -2500 RspoolNameIsEmpty: RSPool名称为空
+- -2503 RspoolNameExist: RSPool已经存在
+- -2511 RspoolNameNotSupport: RSPool名称错误
+
+当需要删除一个RS Pool时，调用delete_rs_pool接口。
+接口路径: action=delete_rs_pool
+必选参数:
+- region_no: string
+- rs_pool_name: string，RS Pool名称
+- aliyun_idkp: string
+- bid: string
+说明: delete_rs_pool在有VIP关联该RSPool时不能删除，需要先解除VIP与RSPool的关联。没有VIP关联时才能成功删除，返回删除前的RS列表。
+成功返回: {"code":200,"msg":"successful","data":{"name":"pool1","port":80,"protocol":"http","realservers":[...]}}
+
+create_rs_pool接口创建RS Pool后端服务器池，rs_pool_name在同一用户下必须唯一。可以通过port参数设置统一后端端口，也可以不设port让每个RS使用不同端口。type=app时创建应用型rspool支持配置scheduler和check。delete_rs_pool删除RSPool时必须先确保没有VIP关联。
+
+创建RSPool调用create_rs_pool，核心参数是rs_pool_name（用户下唯一）。RSPool的port设置策略：如果设置了port，则池中所有RS共用此port；如果不设置port，则每个RS在add_rs时单独指定port。应用型RSPool通过type=app创建，支持调度算法和健康检查配置。删除RSPool前需确保无VIP引用。
+## add_rs + config_rs + delete_rs + switch_rs - RSPool级别RS操作
+
+当需要向RSPool添加后端服务器时，调用add_rs接口。
+接口路径: action=add_rs
+必选参数:
+- region_no: string
+- rs_pool_name: string，RS Pool名称
+- rs_list: string，RealServer结构JSON列表，最多20个
+- aliyun_idkp: string
+- bid: string
+说明: add_rs添加一组RS到指定RSPool。RS需指定port（每个RS可使用不同port）。已存在的RS会被忽略不报错。VIP为running状态时进入configuring，stopped状态保持不变。不允许添加的rs本身是lb类型，不支持lb串联。同一rspool中tunnel_id必须相同。
+成功返回: {"code":200,"msg":"successful","data":{"rs_pool_name":"testpool1","rs_list":[...]}}
+
+当需要配置RSPool中RS的权重时，调用config_rs接口。
+接口路径: action=config_rs
+必选参数: region_no, rs_pool_name, rs_list(最多20个), aliyun_idkp, bid
+说明: config_rs对指定RSPool中一组RS的weight值进行配置。
+
+当需要从RSPool中移除后端服务器时，调用delete_rs接口。
+接口路径: action=delete_rs
+必选参数: region_no, rs_pool_name, rs_list(最多20个), aliyun_idkp, bid
+说明: delete_rs从RSPool中去除一组RS。已删除的RS会被忽略不报错。
+
+当需要原子替换RSPool中的后端服务器时，调用switch_rs接口。
+接口路径: action=switch_rs
+必选参数:
+- region_no: string
+- rs_pool_name: string
+- old_rs: string，被删除的RS列表，最多20个
+- new_rs: string，新增的RS列表，最多20个
+- aliyun_idkp: string
+- bid: string
+说明: switch_rs原子替换一组RS，old_rs中不存在的RS会被忽略。返回更新后的RS列表。
+常见错误码:
+- -2500 RspoolNameIsEmpty: RSPool名称为空
+- -2501 LbRsListIsEmpty: RS-list为空
+- -2502 LB_RS_List_Illegal: RS-list格式非法
+- -2510 RealServerWeightNotSupport: RS权重错误
+- -2512 RealServerToMany: RS数目过多
+- -2514 RealServerPortNotSupport: RS端口不支持
+
+在RSPool级别操作RS有四个接口：add_rs添加后端服务器，config_rs配置RS权重，delete_rs删除后端服务器，switch_rs原子替换一组RS。RSPool级别的RS操作中每个RS需要单独指定port，同一rspool中所有RS的tunnel_id必须相同。add_rs和delete_rs对已存在或已删除的RS都会忽略不报错。
+
+RSPool级别RS操作的特点：add_rs向rspool添加RS时每个RS可指定不同port，最多20个；config_rs修改RS的weight值；delete_rs移除RS；switch_rs用new_rs替换old_rs实现原子切换。所有操作中如果关联的VIP处于running状态会自动进入configuring状态。不允许lb串联，即rs不能是lb类型。
+
+
+## add_lb_rs + config_lb_rs + delete_lb_rs + switch_lb_rs - LB实例级别RS操作
+
+当需要向LB实例直接添加后端服务器时，调用add_lb_rs接口。
+接口路径: action=add_lb_rs
+必选参数:
+- region_no: string
+- lb_id: string，LoadBalancer的唯一标识
+- rs_list: string，RealServer结构JSON列表，最多20个
+- aliyun_idkp: string
+可选参数:
+- bid: string
+说明: add_lb_rs为LoadBalancer添加一组RS。RS不能指定port（所有RS共用监听的后端port）。添加到LB后端的RS会自动关联到该LB实例的每个监听上。已存在的RS会被忽略不报错。不允许rs本身是lb类型，不允许lb挂lb。
+成功返回: {"code":200,"msg":"successful","data":{"lb_id":"12345678","rs_list":[{"rs_ip":"1.1.1.1","weight":100}]}}
+
+当需要配置LB实例中RS权重时，调用config_lb_rs接口。
+接口路径: action=config_lb_rs
+必选参数: region_no, lb_id, rs_list(最多20个), aliyun_idkp
+说明: config_lb_rs对LB中的一组RS的weight值进行配置。
+
+当需要从LB实例中移除后端服务器时，调用delete_lb_rs接口。
+接口路径: action=delete_lb_rs
+必选参数: region_no, lb_id, rs_list(最多20个), aliyun_idkp
+说明: delete_lb_rs从LB中删除一组RS。不存在的RS会被忽略不报错。
+
+当需要原子替换LB实例中后端服务器时，调用switch_lb_rs接口。
+接口路径: action=switch_lb_rs
+必选参数: region_no, lb_id, old_rs(最多20个), new_rs(最多20个), aliyun_idkp
+说明: switch_lb_rs从LB中将一组RS切换成另一组RS，返回更新后的RS列表。
+常见错误码:
+- -2103 APINotSupportForThisTypeOfLb: API不支持该类型LB
+- -2601 LbIdIsEmpty: LB ID为空
+- -2610 LbIdNotExist: LB ID不存在
+- -2800 VmTooMany: 一次传入的VM过多
+- -2804 VmWeightNotSupport: VM权重不合法
+- -2807 VmTypeNotMatch: VM类型不匹配
+
+LB实例级别RS操作有四个接口：add_lb_rs、config_lb_rs、delete_lb_rs、switch_lb_rs。与RSPool级别操作的核心区别是：LB级别RS不能指定port（共用监听后端port），添加到LB后端的RS自动关联到所有监听。不允许LB串联。
+
+add_lb_rs和add_rs的区别：add_lb_rs向LB实例直接添加RS，RS不指定port共用监听后端端口，自动关联到所有监听；add_rs向RSPool添加RS，每个RS需单独指定port。LB级别操作通过lb_id定位，RSPool级别通过rs_pool_name定位。两种方式不建议混用。
+## SLB数据结构 - Listener/TcpConfig/TcpCheck/HttpCheck/UdpConfig/UdpCheck/RealServer
+
+Listener结构:
+- protocol: 必选，string，支持tcp/http/https/udp/tcps
+- frontend_port: 必选，int，前端端口1-65535
+- backend_port: 可选，int，后端端口1-65535
+- rs_pool_name: 可选，string，backend_port和rs_pool_name必传其一，都传以rs_pool_name为准
+- bandwidth: 可选，string，出流量带宽上限，支持k/m/g后缀，最大4GBytes/s
+- status: 可选，string，active/inactive，默认inactive
+- config: 可选，struct，TcpConfig或UdpConfig的JSON字符串
+
+TcpConfig结构:
+- scheduler: 可选，string，wrr/wlc/rr，默认wrr
+- check: 可选，string，TcpCheck或HttpCheck结构JSON，默认关闭
+- syn_proxy: 可选，string，ENABLE/DISABLE
+- est_timeout: 可选，int，TCP超时时间10-1200秒，默认900
+- connection_drain: 可选，string，on/off，连接优雅中断，默认off
+- connection_drain_timeout: 可选，int，优雅中断超时10-900秒
+- proxy_protocol_v2_enabled: 可选，string，on/off
+- session_resched: 可选，string，on/off，链接重调度，默认off
+
+TcpCheck结构:
+- type: 必选，string，设为tcp
+- timeout: 可选，int，连接超时1-1000秒，默认5
+- port: 可选，int，健康检查端口1-65535，默认使用后端服务端口
+- interval: 可选，int，检查间隔1-1000秒，默认2
+- up: 可选，int，fail到success的连续成功次数1-1000，默认3
+- down: 可选，int，success到fail的连续失败次数1-1000，默认3
+
+HttpCheck结构:
+- type: 必选，string，设为http或ssl（tcp监听支持ssl类型健康检查）
+- domain: 可选，string，健康检查域名
+- port: 可选，int，健康检查端口
+- uri: 可选，string，健康检查URI
+- up: 可选，int，默认3
+- down: 可选，int，默认3
+- timeout: 可选，int，默认5
+- interval: 可选，int，默认2
+- http_status_code: 可选，string，如http_2xx,http_3xx，默认http_2xx,http_3xx
+
+UdpConfig结构:
+- scheduler: 可选，string，wrr/wlc/rr，默认wrr
+- persistence_timeout: 可选，int，0-86400秒，0表示关闭，默认0
+- check: 可选，string，UdpCheck结构JSON
+
+UdpCheck结构:
+- type: 必选，string，设为udp
+- timeout: 可选，int，默认2
+- port: 可选，int
+- interval: 可选，int，默认2
+- up: 可选，int，默认3
+- down: 可选，int，默认3
+
+RealServer结构:
+- rs_ip: 必选，string，Real Server的IP
+- weight: 可选，int，权重0-1000，默认100
+- port: 可选，int，add_rs类接口必须指定port，add_lb_rs类接口不指定port
+- rs_type: 可选，string，classic（经典网络）
+- proxy_protocol: 可选，string，on/off
+
+SLB的Listener数据结构包含protocol、frontend_port、backend_port或rs_pool_name、bandwidth、status和config字段。TcpConfig中scheduler支持wrr（加权轮询）、wlc（加权最小连接）、rr（轮询）三种调度算法。健康检查通过check字段配置TcpCheck或HttpCheck，关键参数有type、timeout、port、interval、up、down。connection_drain用于连接优雅中断。
+
+RealServer结构的核心字段是rs_ip和weight，port字段在RSPool级别操作（add_rs）时必须指定，在LB级别操作（add_lb_rs）时不指定。rs_type标识后端RS的网络类型，OXS上的物理机或ECS均按classic类型挂载。UdpConfig与TcpConfig类似但额外支持persistence_timeout连接持久化和fingerprint_num指纹过滤。
+
+
+## SLB完整操作流程 - 从创建到上线
+
+SLB实例从创建到上线的完整流程:
+步骤1: 创建LoadBalancer实例
+  操作: 调用create_loadbalancer，传入region_no、bid、aliyun_idkp，获得lb_id和eip
+步骤2: 准备后端服务器（两种方式二选一）
+  方式A - RSPool方式:
+    2a-1: 调用create_rs_pool创建RS Pool，指定rs_pool_name
+    2a-2: 调用add_rs向RSPool添加后端RS（每个RS可指定不同port）
+  方式B - LB直接挂载方式:
+    2b-1: 调用add_lb_rs向LB实例直接添加后端RS（RS共用监听后端port）
+步骤3: 创建VIP监听
+  操作: 调用create_vip，传入listeners列表（含protocol、frontend_port、backend_port或rs_pool_name）
+步骤4: 激活VIP
+  操作: 调用config_vip设置status=active，或在create_vip时Listener的status设为active
+步骤5: 验证健康检查
+  操作: 调用query_lb_healthcheck检查后端RS健康状态
+
+两种后端RS管理方式对比:
+RSPool方式（add_rs）: 每个RS可指定不同port，通过rs_pool_name关联VIP，适合复杂场景
+LB直接挂载方式（add_lb_rs）: RS共用监听后端port，自动关联到LB所有监听，适合简单场景
+注意: 同一rspool或lb后端的RS的tunnel_id必须相同，不允许LB串联
+
+VIP状态流转说明:
+创建后默认stopped → config_vip(active) → starting → running（可正常服务）
+running → config_vip(修改配置) → configuring → running
+running → config_vip(inactive) → stopping → stopped
+注意: starting/configuring/stopping状态下不能操作VIP
+
+SLB从创建到上线需要经过create_loadbalancer创建实例、add_rs或add_lb_rs添加后端服务器、create_vip创建监听、config_vip设置active激活这几个步骤。后端RS管理有RSPool和LB直接挂载两种方式，RSPool方式更灵活支持每个RS不同port，LB直接挂载方式更简单RS自动关联所有监听。
+
+完整的SLB上线流程：首先create_loadbalancer获取lb_id和eip，然后选择RSPool方式（create_rs_pool + add_rs）或LB直接挂载方式（add_lb_rs）准备后端服务器，接着create_vip创建监听指定protocol和frontend_port，最后config_vip设active激活VIP开始服务。VIP激活后从stopped变为starting再变为running。
+
+
+

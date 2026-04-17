@@ -1,0 +1,10 @@
+问: SLB Rule系统中tag标签的命名规范是什么？
+答: tag格式为${类型}_${region_id}，共三种类型：
+默认水位配置: default_${region_id}，例如default_cn_hangzhou
+安全水位配置: safe_${region_id}，例如safe_cn_hangzhou
+具体租户限制: uid_${region_id}，例如uid_cn_hangzhou
+注意: uid是固定字符串前缀，如uid_cn_beijin_1, uid_cn_region_hangzhou_1。Rule系统会对default、safe、uid这些特殊前缀进行识别。
+
+Rule系统tag有三种格式：default_regionId表示默认水位，safe_regionId表示安全水位，uid_regionId表示单租户限制，uid时需要配合user_id字段
+
+SLB tag命名规范：类型前缀加下划线加region_id，类型有default(默认)、safe(安全水位)、uid(具体租户)

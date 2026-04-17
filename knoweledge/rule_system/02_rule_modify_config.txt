@@ -1,0 +1,14 @@
+## Rule系统变更配置
+步骤 1: 进入配置页
+  操作: 在欢迎页URL后面加上/ruleConfig
+步骤 2: 搜索目标规则
+  操作: 产品code填slb，action填规则配置文档给出的action
+步骤 3: 修改配置
+  操作: 只修改config内容，其他字段不能变
+  注意: 其他字段修改可能导致配置失效
+步骤 4: 刷新缓存
+  操作: 修改完成后刷缓存使新配置生效
+
+变更Rule配置的方法：访问/ruleConfig路径，用product=slb和action筛选规则，仅修改config值，改完刷缓存生效
+
+修改SLB Rule规则：URL加/ruleConfig进入配置页，按产品code和action搜索，注意只能改config内容不能改其他字段

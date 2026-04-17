@@ -1,0 +1,11 @@
+## Rule系统登录流程
+步骤 1: 登陆天基，搜索服务webapp-rule
+  操作: 在天基服务搜索框中搜索webapp-rule
+步骤 2: 查找openapi.endpoint
+  操作: 在服务的注册变量中查找openapi.endpoint的值
+步骤 3: 浏览器访问
+  操作: 在浏览器中输入openapi.endpoint地址，进入欢迎页
+
+登录Rule系统的方法：先从天基搜索webapp-rule服务，然后在注册变量里找到openapi.endpoint，最后用浏览器访问该地址进入欢迎页
+
+如何访问Rule配置系统：天基中搜索webapp-rule → 获取注册变量openapi.endpoint → 浏览器打开该URL

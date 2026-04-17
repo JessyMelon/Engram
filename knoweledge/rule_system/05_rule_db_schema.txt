@@ -1,0 +1,15 @@
+rule_config表结构:
+  数据库: rule_db
+  表名: rule_config
+  product: slb
+  action: 规则动作名(统一小写，如vrouter_entry)
+  config_type: config(固定字符串)
+  config: 配置值(整数对应的字符串类型)
+  is_deleted: 0(有效)/1(删除)
+  creator: 修改人
+  gmt_created: 创建时间戳
+  gmt_modified: 修改时间戳
+
+SLB Rule数据库结构：数据库rule_db，表rule_config，核心字段包括product=slb、action(全小写)、config_type=config、config(字符串值)、is_deleted=0
+
+rule_config表关键字段说明：product标识产品slb，action用小写命名，config_type固定config，config是字符串格式的整数值
