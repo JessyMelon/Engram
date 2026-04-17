@@ -220,21 +220,163 @@ grep "^recall_score:\|^val_ppl:\|^peak_vram_mb:" run.log
 
 ## 7. Local Knowledge Injection Demo
 
-冻结预训练主干（Qwen/Llama/...），在指定层插入 Engram 模块，只训练 Engram 参数（约 10-15M），实现高效知识注入：
+冻结预训练主干（Qwen/Llama/...），在指定层插入 Engram 模块，只训练 Engram 参数（约 10-15M），实现高效知识注入。
 
+### 7.1 训练使用说明
+
+#### 基本训练命令（使用内置示例知识）
 ```bash
-# 用内置示例知识训练
 python engram_local_demo.py --epochs 20
+```
 
-# 用本地 txt/md 文件训练
-python engram_local_demo.py --data_dir ./my_texts --epochs 20
+#### 使用本地知识文件训练
+```bash
+python engram_local_demo.py --data_dir ./knoweledge --epochs 20
+```
+> 支持 `.txt` 和 `.md` 格式的知识文件，会递归扫描目录下所有文件。
 
-# 换用更大模型
+#### 使用不同模型
+```bash
+# 小型模型（快速验证）
+python engram_local_demo.py --model Qwen/Qwen2.5-0.5B --epochs 20
+
+# 中型模型
 python engram_local_demo.py --model Qwen/Qwen3-1.7B --epochs 20
 
-# 对比无 Engram 的原始模型
-python engram_local_demo.py --no_engram
+# 大型模型
+python engram_local_demo.py --model Qwen/Qwen3.5-9B --epochs 20
+
+# 多模态模型（Gemma 4）
+python engram_local_demo.py --model google/gemma-4-E4B-it --epochs 20
 ```
+
+#### 多 GPU 张量并行训练
+```bash
+python engram_local_demo.py --model google/gemma-4-E4B-it \
+    --tensor_parallel --gpu_devices "0,1" \
+    --batch_size 4 --seq_len 256 --epochs 20
+```
+
+#### 梯度累积（低显存环境）
+```bash
+# effective batch size = batch_size × accumulation_steps = 1 × 4 = 4
+python engram_local_demo.py --batch_size 1 --accumulation_steps 4 --epochs 20
+```
+
+#### 自定义 Engram 插入层
+```bash
+# 指定在第 4 层和第 12 层插入 Engram 模块
+python engram_local_demo.py --engram_layers "4,12" --epochs 20
+```
+> 不指定时会自动选择 `[max(1, num_layers//6), num_layers//2]`。
+
+### 7.2 交互式检测效果
+
+#### 训练完成后自动进入交互模式
+训练结束后，程序会自动执行知识召回测试，然后进入交互模式：
+```
+============================================================
+  Interactive Mode  (type 'quit' to exit)
+============================================================
+
+You > 登录流程的第一步是什么？
+
+Model > 登录流程的第一步是访问 /login 页面...
+```
+- 输入提示词后按回车获取模型回复
+- 输入 `quit`、`exit` 或 `q` 退出交互模式
+
+#### 加载已保存权重直接进入交互模式
+```bash
+python engram_local_demo.py --load_engram ./engram_weights.pt
+
+# 加载权重并使用自定义评估数据
+python engram_local_demo.py --load_engram ./engram_weights.pt --data_dir ./knoweledge
+```
+
+### 7.3 评估数据说明
+
+#### `*_eval.py` 文件格式
+在 `--data_dir` 目录下放置 `*_eval.py` 文件，可定义召回提示词和期望关键词用于自动评估：
+
+```python
+# 示例: slb_rule_eval.py
+KNOWLEDGE_ENTRIES = [
+    {
+        "id": "login_flow",
+        "recall_prompts": ["登录流程", "如何登录"],
+    },
+]
+
+SLB_RULE_RECALL_PROMPTS = ["登录流程", "如何登录"]
+SLB_RULE_EXPECTED_KEYWORDS = [
+    ["访问", "/login", "跳转"],  # 对应第一组知识
+]
+```
+
+#### 自动加载评估数据
+指定 `--data_dir` 时，程序会自动扫描并加载目录下的 `*_eval.py` 文件。
+
+#### 评估指标
+- **关键词命中率**：检查生成文本中包含多少期望关键词
+- 按知识条目分组统计命中情况
+- 输出每组和总体的召回率
+
+### 7.4 关键命令行参数一览
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--model` | `Qwen/Qwen2.5-0.5B` | HuggingFace 模型 ID |
+| `--data_dir` | None | 本地知识文件目录（.txt/.md） |
+| `--epochs` | 20 | 训练轮数 |
+| `--batch_size` | 2 | 批大小 |
+| `--lr` | 1e-3 | 学习率 |
+| `--seq_len` | 128 | 训练序列长度 |
+| `--save_engram` | `./engram_weights.pt` | 保存 Engram 权重路径 |
+| `--load_engram` | None | 加载已保存的 Engram 权重 |
+| `--no_engram` | False | 禁用 Engram（对比基线） |
+| `--engram_layers` | 自动选择 | Engram 插入层 ID，逗号分隔 |
+| `--tensor_parallel` | False | 启用张量并行（多GPU） |
+| `--gpu_devices` | `"0,1"` | GPU 设备索引，逗号分隔 |
+| `--accumulation_steps` | 1 | 梯度累积步数 |
+| `--fp32` | False | 强制使用 FP32 |
+| `--mirror` | None | HuggingFace 镜像地址 |
+
+### 7.5 常见使用场景命令示例
+
+```bash
+# 场景 1：快速试用（内置知识）
+python engram_local_demo.py --epochs 20
+
+# 场景 2：使用自定义知识训练
+python engram_local_demo.py --data_dir ./knoweledge --epochs 20
+
+# 场景 3：大模型双卡训练
+python engram_local_demo.py --model google/gemma-4-E4B-it \
+    --tensor_parallel --gpu_devices "0,1" \
+    --batch_size 4 --seq_len 256 --epochs 20
+
+# 场景 4：加载已有权重进行交互测试
+python engram_local_demo.py --load_engram ./engram_weights.pt --data_dir ./knoweledge
+
+# 场景 5：低显存环境（梯度累积）
+python engram_local_demo.py --batch_size 1 --accumulation_steps 4 --epochs 20
+
+# 场景 6：对比基线（无 Engram）
+python engram_local_demo.py --no_engram --epochs 20
+```
+
+### 7.6 多模型支持说明
+
+支持的模型架构：
+
+| 类型 | 模型示例 | 路径自动探测 |
+|------|----------|-------------|
+| 标准文本模型 | Qwen2.5、Qwen3、Llama、Mistral | `model.model.layers` |
+| 多模态模型 | Gemma 4 (ForConditionalGeneration) | `model.model.language_model.layers` |
+| GPT-2 系列 | GPT-2、GPT-Neo | `model.transformer.h` |
+
+> 程序会自动探测模型结构并适配 Engram 插入层。对于新模型架构，可能需要更新 `_find_transformer_layers()` 函数。
 
 ## 8. License
 The use of Engram models is subject to [the Model License](LICENSE).
