@@ -1,0 +1,13 @@
+{
+  "phase": "not_started",
+  "updated_at": "",
+  "phases": {
+    "inventory": "pending",
+    "index": "pending",
+    "modules": "pending",
+    "flows": "pending",
+    "review": "pending",
+    "incremental_updates": "pending"
+  },
+  "notes": []
+}
